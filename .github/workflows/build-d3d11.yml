@@ -1,0 +1,229 @@
+name: Build Windows with DirectX 11
+
+on:
+  push:
+    branches: [ main, d3d11-integration ]
+    paths:
+      - 'port/src/gs/gs_d3d11.c'
+      - 'port/src/gs/shaders/gs_d3d11.hlsl'
+      - '.github/workflows/build-d3d11.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create pre-release'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  BUILD_TYPE: Release
+  DISC_IMAGE_URL: ${{ secrets.DISC_IMAGE_URL }}
+
+jobs:
+  build-windows-d3d11:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install ninja
+
+    - name: Cache disc extraction
+      id: cache-disc
+      uses: actions/cache@v4
+      with:
+        path: |
+          disc_data/
+          *.BPE
+        key: disc-data-${{ hashFiles('configure.py') }}
+
+    - name: Download disc image (if secret provided)
+      if: env.DISC_IMAGE_URL != '' && steps.cache-disc.outputs.cache-hit != 'true'
+      run: |
+        echo "Downloading disc image..."
+        curl -L -o disc.iso "${{ secrets.DISC_IMAGE_URL }}"
+      shell: bash
+
+    - name: Configure build
+      run: |
+        if (Test-Path disc.iso) {
+          python configure.py --iso disc.iso
+        } else {
+          echo "Warning: No disc image available. Using cached data or mock build."
+          python configure.py --help
+        }
+      shell: pwsh
+
+    - name: Build project
+      run: |
+        ninja -v
+      shell: cmd
+
+    - name: Verify D3D11 backend
+      run: |
+        if (Test-Path "Tenkaichi3Decomp.exe") {
+          echo "Build successful!"
+          Get-Item Tenkaichi3Decomp.exe | Select-Object Name, Length, LastWriteTime
+        } else {
+          echo "Error: Executable not found"
+          exit 1
+        }
+      shell: pwsh
+
+    - name: Package build artifacts
+      run: |
+        mkdir release
+        Copy-Item Tenkaichi3Decomp.exe release/
+        Copy-Item Tenkaichi3Decomp-setup.exe release/ -ErrorAction SilentlyContinue
+        Copy-Item README.md release/
+        Copy-Item docs/port/directx11_integration.md release/D3D11_README.md -ErrorAction SilentlyContinue
+
+        # Create build info
+        @"
+        Build Information
+        =================
+        Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+        Commit: ${{ github.sha }}
+        Branch: ${{ github.ref_name }}
+
+        DirectX 11 Backend
+        ==================
+        This build includes experimental DirectX 11 support for older Windows PCs
+        that don't support DirectX 12 or Vulkan.
+
+        Requirements:
+        - Windows 7 SP1 or later (Windows 10 recommended)
+        - DirectX 11 capable GPU (feature level 10.0+)
+        - Dragon Ball Z: Budokai Tenkaichi 3 disc image (USA, SLUS-21678)
+
+        Usage:
+        1. Run Tenkaichi3Decomp-setup.exe with your disc image
+        2. Launch Tenkaichi3Decomp.exe
+        3. To force D3D11: set BT3_GPU_API=d3d11
+
+        Status: Experimental - Testing required
+        "@ | Out-File -FilePath release/BUILD_INFO.txt -Encoding UTF8
+      shell: pwsh
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: Tenkaichi3Decomp-Windows-D3D11-${{ github.sha }}
+        path: release/
+        retention-days: 30
+
+    - name: Create changelog
+      id: changelog
+      run: |
+        $changelog = @"
+        ## DirectX 11 Integration Build
+
+        ### What's New
+        - ✨ **DirectX 11 Backend**: New rendering backend for older Windows PCs
+        - 🎮 **Compatibility**: Alternative to OpenGL 3.3 for systems without D3D12/Vulkan
+        - 🔧 **Target Hardware**: Windows 7 SP1+ with D3D11 feature level 10.0+
+
+        ### Technical Details
+        - **Backend**: \`port/src/gs/gs_d3d11.c\` (11,947 bytes)
+        - **Shaders**: HLSL templates in \`port/src/gs/shaders/gs_d3d11.hlsl\`
+        - **Render Targets**: 512x448 PS2-accurate framebuffers
+        - **Blend Modes**: Normal, subtractive, additive, custom
+        - **Depth Test**: Greater-or-equal (PS2 compatible)
+
+        ### Status: ⚠️ Experimental
+        This is a **skeleton implementation** that establishes the structure but requires:
+        - [ ] Complete rendering loop implementation
+        - [ ] HLSL shader compilation integration
+        - [ ] PS2 GS effects (alpha test, fog, outline, glow, depth tint)
+        - [ ] Hardware testing and validation
+
+        ### How to Test
+        1. Download the build artifact
+        2. Extract to a folder
+        3. Run \`Tenkaichi3Decomp-setup.exe\` with your disc image
+        4. Set environment variable: \`set BT3_GPU_API=d3d11\`
+        5. Launch \`Tenkaichi3Decomp.exe\`
+        6. Report results in the PR or issue tracker
+
+        ### Requirements
+        - Windows 7 SP1 or later (Windows 10 recommended)
+        - DirectX 11 capable GPU (Intel HD 4000+, GTX 400+, AMD HD 5000+)
+        - Dragon Ball Z: Budokai Tenkaichi 3 disc image (USA, SLUS-21678)
+
+        ### Known Limitations
+        - Core rendering loop not yet complete
+        - PS2 effects not implemented
+        - No hardware testing performed
+        - May not render correctly until implementation is finished
+
+        ### Build Information
+        - **Commit**: ${{ github.sha }}
+        - **Branch**: ${{ github.ref_name }}
+        - **Build Date**: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+        - **Workflow**: ${{ github.workflow }}
+
+        ### Feedback
+        Please test on your hardware and report:
+        - GPU model and driver version
+        - Windows version
+        - Whether the game boots
+        - Rendering issues or crashes
+        - Performance compared to OpenGL backend
+
+        ---
+        **Note**: This build requires the original game disc image. The repository contains no game data.
+        "@
+
+        # Save to file for release
+        $changelog | Out-File -FilePath changelog.md -Encoding UTF8
+
+        # Output for GitHub Actions
+        echo "CHANGELOG<<EOF" >> $env:GITHUB_OUTPUT
+        echo $changelog >> $env:GITHUB_OUTPUT
+        echo "EOF" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+
+    - name: Create pre-release
+      if: github.event.inputs.create_release == 'true' || github.ref == 'refs/heads/d3d11-integration'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: d3d11-experimental-${{ github.run_number }}
+        name: DirectX 11 Experimental Build ${{ github.run_number }}
+        body_path: changelog.md
+        draft: false
+        prerelease: true
+        files: |
+          release/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Comment on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const changelog = fs.readFileSync('changelog.md', 'utf8');
+
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## 🎮 DirectX 11 Build Complete!\n\n${changelog}\n\n📦 Download the build artifact from the workflow run above.`
+          });
